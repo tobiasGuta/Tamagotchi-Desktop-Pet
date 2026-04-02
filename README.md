@@ -4,11 +4,13 @@ A virtual desktop pet built with PyQt5. It features an animated vector interface
 
 ## Features
 
-- **Animated Interface:** Smooth vector graphics and animations reflecting the pet's current emotion (happy, sad, angry, thinking, bored, excited, sweating, surprised).
-- **LLM Integration:** Powered by Ollama, enabling intelligent and contextual conversations.
-- **System Monitoring:** Keeps track of your CPU and RAM usage, reacting when your system is under heavy load.
-- **Context Awareness:** Monitors the active window (on Windows OS) and comments on your activities like coding or watching videos.
-- **Interactive:** Follows your mouse, reacts to being poked, and supports drag-and-drop for "feeding" text files.
+- **Animated Interface & Personality:** Smooth vector graphics reflecting various emotions. Animations naturally slow down at night as the pet gets sleepy.
+- **Voice Responses:** Speaks your LLM's responses out loud dynamically using high-quality Microsoft Edge TTS ("JennyNeural").
+- **Time & Weather Aware:** Understands your local weather/time dynamically on startup to give context-aware greetings.
+- **Long-Term Memory:** Extracts facts and preferences about you during conversations (saved to `memory.json`), letting it remember things days later!
+- **System & App Monitoring:** Keeps track of CPU/RAM load. Detects when you open music apps (Spotify, Apple Music) to dance or groans if you're coding well past midnight.
+- **Idle Detection:** Notices if you've been AFK for over 10 minutes and complains about being bored.
+- **Interactive & Expressive:** Reacts in real-time letter-by-letter as you type (curious -> invested -> impatient). Follows your mouse, and loves being feed text files via drag-and-drop.
 - **Clipboard Reading:** Type "read this" in the input box to let the pet read and comment on your clipboard content.
 
 ## Prerequisites
@@ -55,6 +57,7 @@ python Tamagotchi.py
 - **Petting:** Wiggle your mouse over the pet to make it happy.
 - **Chat:** Double-click the pet to open/close the text input box.
 - **Feed:** Drag and drop text files (.txt, .py, .md) onto the pet.
+- **Quit:** Right-click the pet to open a context menu to exit the app.
 
 ## Configuration
 
@@ -65,9 +68,3 @@ export OLLAMA_URL="http://localhost:11434/api/generate"
 # or on Windows:
 # set OLLAMA_URL="http://localhost:11434/api/generate"
 ```
-
-
-https://github.com/user-attachments/assets/5044840e-db36-4737-baee-9276e1c903a1
-
-https://github.com/user-attachments/assets/0a6c9f36-4a85-49b0-9c26-1e1cb64fb827
-
