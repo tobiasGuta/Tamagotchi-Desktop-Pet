@@ -5,12 +5,107 @@ import requests
 import math
 import psutil
 import ctypes
-from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout, QLineEdit
+import collections
+import json
+import asyncio
+import edge_tts
+from datetime import datetime
+from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout, QLineEdit, QMenu, QAction, QInputDialog
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QUrl
 from PyQt5.QtGui import QPainter, QColor, QBrush, QPen
-from PyQt5.QtMultimedia import QSoundEffect
+from PyQt5.QtMultimedia import QSoundEffect, QMediaPlayer, QMediaContent
 
 DEBUG = True
+
+if sys.platform == "win32":
+    class LASTINPUTINFO(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+# --- STARTUP WORKER FOR TIME/WEATHER AWARENESS ---
+class StartupContextWorker(QThread):
+    finished = pyqtSignal(dict)
+
+    def run(self):
+        context = {}
+        # Time Awareness
+        hour = datetime.now().hour
+        if 5 <= hour < 12: context['time'] = "Morning"
+        elif 12 <= hour < 17: context['time'] = "Afternoon"
+        elif 17 <= hour < 22: context['time'] = "Evening"
+        else: context['time'] = "Late Night"
+        
+        # Weather Awareness
+        try:
+            geo = requests.get("https://get.geojs.io/v1/ip/geo.json", timeout=5).json()
+            lat, lon, city = geo.get('latitude', ''), geo.get('longitude', ''), geo.get('city', '')
+            if lat and lon:
+                weather_res = requests.get(f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true", timeout=5).json()
+                wcode = weather_res.get('current_weather', {}).get('weathercode', 0)
+                temp = weather_res.get('current_weather', {}).get('temperature', 0)
+                
+                weather_desc = "Clear"
+                if wcode in [1, 2, 3]: weather_desc = "Cloudy"
+                elif wcode in [45, 48]: weather_desc = "Foggy"
+                elif wcode in [51, 53, 55, 56, 57]: weather_desc = "Drizzling"
+                elif wcode in [61, 63, 65, 66, 67]: weather_desc = "Raining"
+                elif wcode in [71, 73, 75, 77]: weather_desc = "Snowing"
+                elif wcode in [95, 96, 99]: weather_desc = "Thunderstorm"
+                
+                context['weather'] = f"{weather_desc}, {temp}°C in {city}"
+        except Exception:
+            context['weather'] = "Unknown weather"
+            
+        self.finished.emit(context)
+
+
+# --- BACKGROUND WORKER FOR EDGE-TTS (Prevents UI Freezing) ---
+class TTSWorker(QThread):
+    finished = pyqtSignal(str)
+
+    def __init__(self, text, output_path):
+        super().__init__()
+        self.text = text
+        self.output_path = output_path
+
+    def run(self):
+        try:
+            # edge-tts requires asyncio event loop on this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            communicate = edge_tts.Communicate(self.text, "en-US-JennyNeural", rate="+10%")
+            loop.run_until_complete(communicate.save(self.output_path))
+            loop.close()
+            self.finished.emit(self.output_path)
+        except Exception as e:
+            print(f"TTS Error: {e}")
+            self.finished.emit("")
+
+
+# --- BACKGROUND WORKER FOR MEMORY EXTRACTION ---
+class MemoryWorker(QThread):
+    finished = pyqtSignal(str)
+
+    def __init__(self, url, model, text):
+        super().__init__()
+        self.url = url
+        self.model = model
+        self.text = text
+
+    def run(self):
+        try:
+            today = datetime.now().strftime("%A (%Y-%m-%d)")
+            prompt = f"Extract a brief fact (hobby, plan, project, preference) about the user from this message if it contains long-term info. If none, reply 'NONE'. Keep it under 15 words. Talk about the user in third person ('User'). Today is {today}. Message: '{self.text}'"
+            response = requests.post(
+                self.url,
+                json={"model": self.model, "prompt": prompt, "stream": False},
+                timeout=15 
+            )
+            data = response.json()
+            if "response" in data:
+                self.finished.emit(data["response"].strip())
+        except Exception:
+            self.finished.emit("NONE")
+
 
 # --- BACKGROUND WORKER FOR OLLAMA (Prevents UI Freezing) ---
 class OllamaWorker(QThread):
@@ -117,6 +212,13 @@ class AnimatedPetGraphics(QWidget):
             bounce_height = 0
             eye_state = "wide"
 
+        # Time-based slowdown
+        hour = datetime.now().hour
+        if 0 <= hour < 5 or hour >= 23:
+            bounce_speed *= 0.4 # Very tired and slow
+        elif 20 <= hour < 23:
+            bounce_speed *= 0.7 # Getting sleepy
+
         # Math for breathing/bouncing animation + Jumping
         offset_y = (math.sin(self.frame * bounce_speed) * bounce_height) + self.jump_offset
         center_x = 100
@@ -171,20 +273,36 @@ class Tamagotchi(QWidget):
     def __init__(self):
         super().__init__()
         
+        # Base Dir & Config
+        self.base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.config_path = os.path.join(self.base_dir, "config.json")
+        self.memory_path = os.path.join(self.base_dir, "memory.json")
+        
+        self.config = self.load_or_create_config()
+        self.pet_name = self.config.get("pet_name", "Tamagotchi")
+        self.long_term_memory = self.load_memory()
+
         self.ollama_url = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
         self.model = "llama3.2:3b"
-        self.system_prompt = "You are a cute, expressive virtual desktop pet. Keep answers short (1-2 sentences). You MUST end EVERY response with exactly one emotion tag in brackets. Choose from: [happy], [sad], [angry], [thinking], [bored], [excited], [sweating], [surprised]."
+        self.system_prompt = f"You are a cute, expressive virtual desktop pet named {self.pet_name}. Keep answers short (1-2 sentences)."
         
         # Memory System
-        self.chat_history = [] 
+        self.chat_history = collections.deque(maxlen=8) 
         self.last_window_title = ""
         self.mouse_travel = 0
+        self.is_bored_idle = False
 
         # Sound System
+        os.makedirs(os.path.join(self.base_dir, "sounds"), exist_ok=True)
+        self.speech_output_path = "" # Generated dynamically to avoid file locks
+        self.media_player = QMediaPlayer()
+
+        self.pop_sound_path = os.path.join(self.base_dir, "sounds", "pop.wav")
+        self.squeak_sound_path = os.path.join(self.base_dir, "sounds", "squeak.wav")
         self.pop_sound = QSoundEffect()
-        self.pop_sound.setSource(QUrl.fromLocalFile("sounds/pop.wav"))
+        self.pop_sound.setSource(QUrl.fromLocalFile(self.pop_sound_path))
         self.squeak_sound = QSoundEffect()
-        self.squeak_sound.setSource(QUrl.fromLocalFile("sounds/squeak.wav"))
+        self.squeak_sound.setSource(QUrl.fromLocalFile(self.squeak_sound_path))
 
         # Window setup (Accepts Drops for Feeding!)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.SubWindow)
@@ -209,6 +327,7 @@ class Tamagotchi(QWidget):
         self.input_box.setStyleSheet("background-color: rgba(255, 255, 255, 0.95); border: 2px solid #a8ffb2; border-radius: 8px; padding: 6px; color: black;")
         self.input_box.hide()
         self.input_box.returnPressed.connect(self.process_user_input)
+        self.input_box.textChanged.connect(self.on_typing)
 
         layout.addWidget(self.speech)
         layout.addWidget(self.pet_canvas, alignment=Qt.AlignCenter)
@@ -217,12 +336,57 @@ class Tamagotchi(QWidget):
         self.move(1200, 600)
 
         # AI Worker Thread
-        self.worker = None
+        self.active_ollama_workers = set()
+        self.active_tts_workers = set()
+        self.active_memory_workers = set()
 
         # Idle & System Monitoring Timer
         self.system_timer = QTimer()
         self.system_timer.timeout.connect(self.monitor_system)
         self.system_timer.start(5000) # Check every 5 seconds
+
+        # Start initial context fetch (Weather & Time)
+        self.startup_worker = StartupContextWorker()
+        self.startup_worker.finished.connect(self.on_startup_context_ready)
+        self.startup_worker.start()
+
+    def load_or_create_config(self):
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        
+        # If not exists or corrupted, ask for pet name
+        name, ok = QInputDialog.getText(None, "New Pet!", "What should we call your new pet?")
+        name = name.strip() if ok and name.strip() else "Tamagotchi"
+        config = {"pet_name": name}
+        with open(self.config_path, 'w', encoding='utf-8') as f:
+            json.dump(config, f)
+        return config
+
+    def load_memory(self):
+        if os.path.exists(self.memory_path):
+            try:
+                with open(self.memory_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return []
+
+    def save_memory(self):
+        with open(self.memory_path, 'w', encoding='utf-8') as f:
+            json.dump(self.long_term_memory, f)
+
+    def on_startup_context_ready(self, context):
+        time_str = context.get('time', 'Unknown time')
+        weather_str = context.get('weather', 'Unknown weather')
+        
+        # Add system context to the first prompt
+        greeting_prompt = f"*System Note: You just woke up. It's {time_str} and the weather outside is {weather_str}. Give the user a short personalized greeting!*"
+        
+        QTimer.singleShot(1000, lambda: self.send_to_ollama(greeting_prompt))
 
     def set_emotion(self, emotion):
         self.pet_canvas.emotion = emotion
@@ -230,7 +394,7 @@ class Tamagotchi(QWidget):
     def show_speech(self, text):
         self.speech.setText(text)
         self.speech.show()
-        if os.path.exists("sounds/pop.wav"):
+        if os.path.exists(self.pop_sound_path):
             self.pop_sound.play()
 
     # --- SENSORS & BRAIN ---
@@ -244,6 +408,9 @@ class Tamagotchi(QWidget):
             return
 
         # 2. Check Active Window (Windows OS specific)
+        if sys.platform != "win32":
+            return
+        
         try:
             hwnd = ctypes.windll.user32.GetForegroundWindow()
             length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
@@ -253,12 +420,37 @@ class Tamagotchi(QWidget):
 
             if active_title != self.last_window_title and active_title:
                 self.last_window_title = active_title
-                if "code" in active_title or "visual studio" in active_title:
-                    self.set_emotion("excited")
-                    self.show_speech("Ooo, are we coding something cool? 💻")
+                if "spotify" in active_title or "youtube music" in active_title or "apple music" in active_title:
+                    self.set_emotion("happy")
+                    self.show_speech("Ooo, I love this song! 🎵 *dances*")
+                elif "code" in active_title or "visual studio" in active_title:
+                    hour = datetime.now().hour
+                    if 0 <= hour < 5:
+                        self.set_emotion("angry")
+                        self.show_speech("Go to sleep! It's too late for coding! 💢")
+                    else:
+                        self.set_emotion("excited")
+                        self.show_speech("Ooo, are we coding something cool? 💻")
                 elif "youtube" in active_title:
                     self.set_emotion("happy")
                     self.show_speech("Whatcha watching? 👀")
+        except:
+            pass # Fails gracefully on non-Windows
+
+        # 3. Check System Idle Time (Windows API)
+        try:
+            lii = LASTINPUTINFO()
+            lii.cbSize = ctypes.sizeof(LASTINPUTINFO)
+            ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lii))
+            millis = ctypes.windll.kernel32.GetTickCount() - lii.dwTime
+            idle_seconds = millis / 1000.0
+            
+            if idle_seconds > 600: # 10 minutes
+                if not getattr(self, 'is_bored_idle', False):
+                    self.is_bored_idle = True
+                    self.send_to_ollama("*System Note: The user has been completely idle and away from their computer for 10 minutes. Get their attention or complain about being bored!*")
+            else:
+                self.is_bored_idle = False
         except:
             pass # Fails gracefully on non-Windows
 
@@ -279,7 +471,7 @@ class Tamagotchi(QWidget):
         if event.button() == Qt.LeftButton:
             self.dragPosition = event.globalPos() - self.frameGeometry().topLeft()
             self.pet_canvas.poke() # Jump!
-            if os.path.exists("sounds/squeak.wav"):
+            if os.path.exists(self.squeak_sound_path):
                 self.squeak_sound.play()
             event.accept()
 
@@ -292,6 +484,13 @@ class Tamagotchi(QWidget):
                 self.input_box.show()
                 self.input_box.setFocus()
                 self.show_speech("I'm listening! 💬")
+
+    def contextMenuEvent(self, event):
+        context_menu = QMenu(self)
+        quit_action = QAction("Quit", self)
+        quit_action.triggered.connect(QApplication.instance().quit)
+        context_menu.addAction(quit_action)
+        context_menu.exec_(event.globalPos())
 
     # --- FEEDING (DRAG & DROP) ---
     def dragEnterEvent(self, event):
@@ -306,13 +505,27 @@ class Tamagotchi(QWidget):
             file_path = event.mimeData().urls()[0].toLocalFile()
             if file_path.endswith('.txt') or file_path.endswith('.py') or file_path.endswith('.md'):
                 with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()[:1000] # Read first 1000 chars so we don't crash Ollama
+                    content = f.read()[:1000].rsplit('\n', 1)[0] # Read first 1000 chars so we don't crash Ollama
                 self.send_to_ollama(f"I just ate a file named {os.path.basename(file_path)}. Here is a taste of it: {content}. What do you think of the flavor?")
             else:
                 self.show_speech("I can only eat text files! Yuck! [sad]")
                 self.set_emotion("sad")
 
     # --- LLM COMMUNICATION ---
+    def on_typing(self, text):
+        if self.active_ollama_workers:
+            return  # Don't interrupt "thinking" or waiting state
+            
+        length = len(text)
+        if length == 0:
+            self.set_emotion("happy")
+        elif length <= 10:
+            self.set_emotion("thinking") # Curious at first
+        elif length <= 25:
+            self.set_emotion("surprised") # Getting invested
+        else:
+            self.set_emotion("bored") # Impatient, taking too long
+
     def process_user_input(self):
         text = self.input_box.text().strip()
         if not text: return
@@ -330,26 +543,51 @@ class Tamagotchi(QWidget):
 
         self.send_to_ollama(text)
 
+    def handle_memory_extracted(self, fact):
+        if fact and "NONE" not in fact.upper() and len(fact) > 5 and len(fact) < 150:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            self.long_term_memory.append(f"[{date_str}] {fact}")
+            self.long_term_memory = self.long_term_memory[-15:] # Keep latest 15 facts cleaner than pop(0)
+            self.save_memory()
+
     def send_to_ollama(self, user_text):
         self.set_emotion("thinking")
         self.show_speech("Thinking... (-_-)")
 
-        # Build Memory Context (Keep last 4 messages)
-        self.chat_history.append({"role": "User", "content": user_text})
-        if len(self.chat_history) > 4:
-            self.chat_history.pop(0)
+        # Trigger Long-Term Memory Extraction but guard against System Notes
+        if not user_text.startswith("*System Note"):
+            mem_worker = MemoryWorker(self.ollama_url, self.model, user_text)
+            self.active_memory_workers.add(mem_worker)
+            mem_worker.finished.connect(self.handle_memory_extracted)
+            mem_worker.finished.connect(lambda res, w=mem_worker: self.active_memory_workers.discard(w))
+            mem_worker.start()
 
-        full_prompt = f"{self.system_prompt}\n\n"
+        # Build Memory Context (Keep last 8 messages)
+        self.chat_history.append({"role": "User", "content": user_text})
+
+        # Add Long Term Memory Context if it exists
+        lt_memory_context = ""
+        if self.long_term_memory:
+            facts = '\n- '.join(self.long_term_memory)
+            lt_memory_context = f"\n[Long-term memories about the user:\n- {facts}]\n"
+
+        full_prompt = f"{self.system_prompt}{lt_memory_context}\n\n"
         for msg in self.chat_history:
             full_prompt += f"{msg['role']}: {msg['content']}\n"
         full_prompt += "Pet:"
 
         # Start background thread so animation doesn't freeze
-        self.worker = OllamaWorker(self.ollama_url, self.model, full_prompt)
-        self.worker.finished.connect(self.handle_ollama_response)
-        self.worker.start()
+        ollama_worker = OllamaWorker(self.ollama_url, self.model, full_prompt)
+        self.active_ollama_workers.add(ollama_worker)
+        ollama_worker.finished.connect(self.handle_ollama_response)
+        ollama_worker.finished.connect(lambda res, w=ollama_worker: self.active_ollama_workers.discard(w))
+        ollama_worker.start()
 
     def handle_ollama_response(self, raw_response):
+        if raw_response.startswith("Error") or raw_response.startswith("My brain disconnected"):
+            if self.chat_history and self.chat_history[-1]["role"] == "User":
+                self.chat_history.pop()
+
         # Extract Emotion
         match = re.search(r'\[([a-zA-Z]+)\]\s*$', raw_response)
         if match:
@@ -360,9 +598,43 @@ class Tamagotchi(QWidget):
         clean_text = re.sub(r'\[.*?\]', '', raw_response).strip()
         self.show_speech(clean_text)
         
+        # Start TTS (Voice)
+        self.speak_text(clean_text)
+        
         # Save to memory
         self.chat_history.append({"role": "Pet", "content": clean_text})
 
+    def speak_text(self, text):
+        if not text: return
+        
+        # 1. Stop current audio and explicitly release the file lock for Windows
+        self.media_player.stop()
+        self.media_player.setMedia(QMediaContent())
+        
+        # 2. Clean up any previous speech.mp3 files to prevent folder bloat
+        sounds_dir = os.path.join(self.base_dir, "sounds")
+        for fname in os.listdir(sounds_dir):
+            if (fname.startswith("speech_") and fname.endswith(".mp3")) or fname == "speech.mp3":
+                file_to_del = os.path.join(sounds_dir, fname)
+                try:
+                    os.remove(file_to_del)
+                except Exception:
+                    pass # Keep going if file is locked
+                    
+        # 3. Create a unique mp3 name for THIS message so edge-tts never hits "Permission Denied"
+        unique_timestamp = int(datetime.now().timestamp() * 1000)
+        self.speech_output_path = os.path.join(sounds_dir, f"speech_{unique_timestamp}.mp3")
+        
+        tts_worker = TTSWorker(text, self.speech_output_path)
+        self.active_tts_workers.add(tts_worker)
+        tts_worker.finished.connect(self.play_speech)
+        tts_worker.finished.connect(lambda path, w=tts_worker: self.active_tts_workers.discard(w))
+        tts_worker.start()
+
+    def play_speech(self, path):
+        if path and os.path.exists(path):
+            self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(path)))
+            self.media_player.play()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
