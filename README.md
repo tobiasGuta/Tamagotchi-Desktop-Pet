@@ -68,3 +68,6 @@ export OLLAMA_URL="http://localhost:11434/api/generate"
 # or on Windows:
 # set OLLAMA_URL="http://localhost:11434/api/generate"
 ```
+https://github.com/user-attachments/assets/5044840e-db36-4737-baee-9276e1c903a1
+
+https://github.com/user-attachments/assets/0a6c9f36-4a85-49b0-9c26-1e1cb64fb827
