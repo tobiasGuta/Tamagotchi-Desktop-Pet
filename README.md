@@ -24,6 +24,16 @@ A virtual desktop pet built with PyQt5. It features an animated vector interface
 pip install -r requirements.txt
 ```
 
+## Windows 
+
+```bash
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+```bash
+.\venv\Scripts\activate
+```
+
 2. Ensure Ollama is running in the background with the proper model pulled:
 
 ```bash
