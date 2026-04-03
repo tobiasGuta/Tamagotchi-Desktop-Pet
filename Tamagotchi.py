@@ -702,6 +702,27 @@ class Tamagotchi(QWidget):
             self.show_speech(f"I can launch: {app_list}")
             return
 
+        # ── Forget Command ───────────────────────────────────────────
+        if lower.startswith("forget ") or lower.startswith("forget about "):
+            prefix_len = 7 if lower.startswith("forget ") else 13
+            topic = lower[prefix_len:].strip()
+            new_memory = []
+            removed = False
+            for mem in self.long_term_memory:
+                if topic in mem.lower() and not removed:
+                    removed = True
+                    continue
+                new_memory.append(mem)
+            if removed:
+                self.long_term_memory = new_memory
+                self.save_memory()
+                self.show_speech(f"I have erased my memory regarding '{topic}', sir.")
+                self.set_emotion("happy")
+            else:
+                self.show_speech(f"I couldn't find any memory mentioning '{topic}', sir.")
+                self.set_emotion("sad")
+            return
+
         self.send_to_ollama(text)
 
     # -----------------------------------------------------------------------
@@ -732,8 +753,35 @@ class Tamagotchi(QWidget):
 
         lt_memory_context = ""
         if self.long_term_memory:
-            facts = '\n- '.join(self.long_term_memory)
-            lt_memory_context = f"\n[Long-term data on user:\n- {facts}]\n"
+            # Live Process Detection Check (Solution 3)
+            # Only include VM/Kali memories if a VM process is running or the user asks about it.
+            vm_keywords = ["kali", "linux", "virtual machine", "vm", "tryhackme"]
+            user_msg_lower = user_text.lower()
+            user_asks_about_vm = any(k in user_msg_lower for k in vm_keywords)
+            
+            vm_running = False
+            if not user_asks_about_vm:
+                vm_procs = ["vmware.exe", "vmware-vmx.exe", "virtualbox.exe", "vboxheadless.exe", "wsl.exe", "vmmem"]
+                for p in psutil.process_iter(['name']):
+                    try:
+                        if p.info['name'].lower() in vm_procs:
+                            vm_running = True
+                            break
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        pass
+
+            filtered_memories = []
+            for mem in self.long_term_memory:
+                mem_lower = mem.lower()
+                is_vm_memory = any(k in mem_lower for k in vm_keywords)
+                # Ignore VM memory if neither the user asked nor the VM is running
+                if is_vm_memory and not (user_asks_about_vm or vm_running):
+                    continue
+                filtered_memories.append(mem)
+
+            if filtered_memories:
+                facts = '\n- '.join(filtered_memories)
+                lt_memory_context = f"\n[Long-term data on user:\n- {facts}]\n"
 
         full_prompt = f"{self.system_prompt}{lt_memory_context}\n\n"
         for msg in self.chat_history:
