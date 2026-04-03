@@ -1,6 +1,7 @@
 import sys
 import os
 import re
+import subprocess
 import requests
 import math
 import psutil
@@ -17,48 +18,139 @@ from PyQt5.QtMultimedia import QSoundEffect, QMediaPlayer, QMediaContent
 
 DEBUG = True
 
+# ---------------------------------------------------------------------------
+# APP MAP  —  add any app here. Use %USERNAME% / %APPDATA% env vars freely.
+# Keys are lowercase nicknames the user types (or JARVIS tags).
+# Values are the executable path or command string.
+# ---------------------------------------------------------------------------
+APP_MAP = {
+    # ── Windows Built-ins ──
+    "notepad":        "notepad.exe",
+    "calculator":     "calc.exe",
+    "paint":          "mspaint.exe",
+    "explorer":       "explorer.exe",
+    "task manager":   "taskmgr.exe",
+    "taskmgr":        "taskmgr.exe",
+    "cmd":            "cmd.exe",
+    "powershell":     "powershell.exe",
+    "terminal":       "wt.exe",
+    "control panel":  "control.exe",
+    "settings":       "ms-settings:",          # opens Win11 Settings via URI
+    "snipping tool":  "SnippingTool.exe",
+    "wordpad":        "wordpad.exe",
+    "regedit":        "regedit.exe",
+
+    # ── Browsers ──
+    "chrome":   r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    "firefox":  r"C:\Program Files\Mozilla Firefox\firefox.exe",
+    "edge":     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    "brave":    r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+    "opera":    r"%LOCALAPPDATA%\Programs\Opera\opera.exe",
+
+    # ── Dev Tools ──
+    "vscode":           r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe",
+    "visual studio":    r"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\devenv.exe",
+    "git bash":         r"C:\Program Files\Git\git-bash.exe",
+    "github desktop":   r"%LOCALAPPDATA%\GitHubDesktop\GitHubDesktop.exe",
+    "postman":          r"%LOCALAPPDATA%\Postman\Postman.exe",
+    "docker":           r"C:\Program Files\Docker\Docker\Docker Desktop.exe",
+    "dbeaver":          r"C:\Program Files\DBeaver\dbeaver.exe",
+
+    # ── Communication ──
+    "discord":  r"%LOCALAPPDATA%\Discord\Update.exe --processStart Discord.exe",
+    "slack":    r"%LOCALAPPDATA%\slack\slack.exe",
+    "teams":    r"%LOCALAPPDATA%\Microsoft\Teams\current\Teams.exe",
+    "zoom":     r"%APPDATA%\Zoom\bin\Zoom.exe",
+    "telegram": r"%APPDATA%\Telegram Desktop\Telegram.exe",
+    "whatsapp": r"%LOCALAPPDATA%\WhatsApp\WhatsApp.exe",
+
+    # ── Media ──
+    "spotify":  r"%APPDATA%\Spotify\Spotify.exe",
+    "vlc":      r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+    "obs":      r"C:\Program Files\obs-studio\bin\64bit\obs64.exe",
+
+    # ── Office ──
+    "word":       r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE",
+    "excel":      r"C:\Program Files\Microsoft Office\root\Office16\EXCEL.EXE",
+    "powerpoint": r"C:\Program Files\Microsoft Office\root\Office16\POWERPNT.EXE",
+    "outlook":    r"C:\Program Files\Microsoft Office\root\Office16\OUTLOOK.EXE",
+    "onenote":    r"C:\Program Files\Microsoft Office\root\Office16\ONENOTE.EXE",
+
+    # ── Utilities ──
+    "7zip":       r"C:\Program Files\7-Zip\7zFM.exe",
+    "winrar":     r"C:\Program Files\WinRAR\WinRAR.exe",
+    "steam":      r"C:\Program Files (x86)\Steam\steam.exe",
+}
+
+# Process names used by psutil when CLOSING apps (lowercase .exe name)
+PROCESS_MAP = {
+    "notepad":        "notepad.exe",
+    "calculator":     "calculator.exe",
+    "paint":          "mspaint.exe",
+    "chrome":         "chrome.exe",
+    "firefox":        "firefox.exe",
+    "edge":           "msedge.exe",
+    "brave":          "brave.exe",
+    "discord":        "discord.exe",
+    "slack":          "slack.exe",
+    "teams":          "teams.exe",
+    "zoom":           "zoom.exe",
+    "spotify":        "spotify.exe",
+    "vlc":            "vlc.exe",
+    "obs":            "obs64.exe",
+    "vscode":         "code.exe",
+    "word":           "WINWORD.EXE",
+    "excel":          "EXCEL.EXE",
+    "powerpoint":     "POWERPNT.EXE",
+    "outlook":        "OUTLOOK.EXE",
+    "steam":          "steam.exe",
+    "telegram":       "telegram.exe",
+    "whatsapp":       "whatsapp.exe",
+}
+
+# ---------------------------------------------------------------------------
+
 if sys.platform == "win32":
     class LASTINPUTINFO(ctypes.Structure):
         _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
 
-# --- STARTUP WORKER FOR TIME/WEATHER AWARENESS ---
+
+# --- STARTUP WORKER ---
 class StartupContextWorker(QThread):
     finished = pyqtSignal(dict)
 
     def run(self):
         context = {}
-        # Time Awareness
         hour = datetime.now().hour
-        if 5 <= hour < 12: context['time'] = "Morning"
+        if 5 <= hour < 12:   context['time'] = "Morning"
         elif 12 <= hour < 17: context['time'] = "Afternoon"
         elif 17 <= hour < 22: context['time'] = "Evening"
-        else: context['time'] = "Late Night"
-        
-        # Weather Awareness
+        else:                  context['time'] = "Late Night"
+
         try:
             geo = requests.get("https://get.geojs.io/v1/ip/geo.json", timeout=5).json()
             lat, lon, city = geo.get('latitude', ''), geo.get('longitude', ''), geo.get('city', '')
             if lat and lon:
-                weather_res = requests.get(f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true", timeout=5).json()
+                weather_res = requests.get(
+                    f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true",
+                    timeout=5).json()
                 wcode = weather_res.get('current_weather', {}).get('weathercode', 0)
-                temp = weather_res.get('current_weather', {}).get('temperature', 0)
-                
+                temp  = weather_res.get('current_weather', {}).get('temperature', 0)
                 weather_desc = "Clear"
-                if wcode in [1, 2, 3]: weather_desc = "Cloudy"
-                elif wcode in [45, 48]: weather_desc = "Foggy"
-                elif wcode in [51, 53, 55, 56, 57]: weather_desc = "Drizzling"
-                elif wcode in [61, 63, 65, 66, 67]: weather_desc = "Raining"
-                elif wcode in [71, 73, 75, 77]: weather_desc = "Snowing"
-                elif wcode in [95, 96, 99]: weather_desc = "Thunderstorm"
-                
+                if wcode in [1, 2, 3]:               weather_desc = "Cloudy"
+                elif wcode in [45, 48]:               weather_desc = "Foggy"
+                elif wcode in [51, 53, 55, 56, 57]:  weather_desc = "Drizzling"
+                elif wcode in [61, 63, 65, 66, 67]:  weather_desc = "Raining"
+                elif wcode in [71, 73, 75, 77]:      weather_desc = "Snowing"
+                elif wcode in [95, 96, 99]:           weather_desc = "Thunderstorm"
                 context['weather'] = f"{weather_desc}, {temp}°C in {city}"
         except Exception:
             context['weather'] = "Unknown weather"
-            
+
         self.finished.emit(context)
 
 
-# --- BACKGROUND WORKER FOR EDGE-TTS (Prevents UI Freezing) ---
+# --- TTS WORKER ---
 class TTSWorker(QThread):
     finished = pyqtSignal(str)
 
@@ -69,10 +161,9 @@ class TTSWorker(QThread):
 
     def run(self):
         try:
-            # edge-tts requires asyncio event loop on this thread
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            communicate = edge_tts.Communicate(self.text, "en-US-JennyNeural", rate="+10%")
+            communicate = edge_tts.Communicate(self.text, "en-GB-RyanNeural", rate="+5%")
             loop.run_until_complete(communicate.save(self.output_path))
             loop.close()
             self.finished.emit(self.output_path)
@@ -81,7 +172,7 @@ class TTSWorker(QThread):
             self.finished.emit("")
 
 
-# --- BACKGROUND WORKER FOR MEMORY EXTRACTION ---
+# --- MEMORY WORKER ---
 class MemoryWorker(QThread):
     finished = pyqtSignal(str)
 
@@ -94,12 +185,10 @@ class MemoryWorker(QThread):
     def run(self):
         try:
             today = datetime.now().strftime("%A (%Y-%m-%d)")
-            prompt = f"Extract a brief fact (hobby, plan, project, preference) about the user from this message if it contains long-term info. If none, reply 'NONE'. Keep it under 15 words. Talk about the user in third person ('User'). Today is {today}. Message: '{self.text}'"
-            response = requests.post(
-                self.url,
-                json={"model": self.model, "prompt": prompt, "stream": False},
-                timeout=15 
-            )
+            prompt = (f"Extract a brief fact (hobby, plan, project, preference) about the user from this message "
+                      f"if it contains long-term info. If none, reply 'NONE'. Keep it under 15 words. "
+                      f"Talk about the user in third person ('User'). Today is {today}. Message: '{self.text}'")
+            response = requests.post(self.url, json={"model": self.model, "prompt": prompt, "stream": False}, timeout=15)
             data = response.json()
             if "response" in data:
                 self.finished.emit(data["response"].strip())
@@ -107,7 +196,7 @@ class MemoryWorker(QThread):
             self.finished.emit("NONE")
 
 
-# --- BACKGROUND WORKER FOR OLLAMA (Prevents UI Freezing) ---
+# --- OLLAMA WORKER ---
 class OllamaWorker(QThread):
     finished = pyqtSignal(str)
 
@@ -119,37 +208,33 @@ class OllamaWorker(QThread):
 
     def run(self):
         try:
-            response = requests.post(
-                self.url,
-                json={"model": self.model, "prompt": self.prompt, "stream": False},
-                timeout=30 
-            )
+            response = requests.post(self.url,
+                json={"model": self.model, "prompt": self.prompt, "stream": False}, timeout=30)
             response_json = response.json()
             if "error" in response_json:
                 self.finished.emit(f"Error: {response_json['error']} [sad]")
             else:
                 self.finished.emit(response_json["response"])
         except Exception as e:
-            self.finished.emit(f"My brain disconnected... {e} [sad]")
+            self.finished.emit(f"Systems offline, sir. {e} [sad]")
 
 
-# --- THE ANIMATED VECTOR PET ---
+# --- ANIMATED PET GRAPHICS ---
 class AnimatedPetGraphics(QWidget):
     def __init__(self):
         super().__init__()
         self.emotion = "happy"
         self.frame = 0
         self.blink_timer = 0
-        self.jump_offset = 0 
+        self.jump_offset = 0
         self.setFixedSize(200, 200)
 
-        # 60 FPS Timer
         self.anim_timer = QTimer()
         self.anim_timer.timeout.connect(self.animate_frame)
-        self.anim_timer.start(16) 
+        self.anim_timer.start(16)
 
     def poke(self):
-        self.jump_offset = -40 # Makes the pet jump up
+        self.jump_offset = -40
         self.emotion = "surprised"
 
     def animate_frame(self):
@@ -157,90 +242,46 @@ class AnimatedPetGraphics(QWidget):
         self.blink_timer += 1
         if self.blink_timer > 180:
             self.blink_timer = 0
-            
-        # Gravity for jumping
         if self.jump_offset < 0:
-            self.jump_offset += 2 # Fall back down
+            self.jump_offset += 2
         else:
             self.jump_offset = 0
-            
         self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        # Base Variables depending on emotion
-        color = QColor(255, 180, 200) # Pink
-        bounce_speed = 0.08
-        bounce_height = 8
-        eye_state = "open"
+        color = QColor(255, 180, 200)
+        bounce_speed, bounce_height, eye_state = 0.08, 8, "open"
 
-        if self.emotion == "sad":
-            color = QColor(120, 160, 255)
-            bounce_speed = 0.03
-            bounce_height = 3
-            eye_state = "half"
-        elif self.emotion == "angry":
-            color = QColor(255, 100, 100)
-            bounce_speed = 0.4
-            bounce_height = 5
-            eye_state = "angry"
-        elif self.emotion == "thinking":
-            color = QColor(200, 150, 255)
-            bounce_speed = 0.05
-            bounce_height = 12
-            eye_state = "open"
-        elif self.emotion == "bored":
-            color = QColor(160, 160, 160)
-            bounce_speed = 0.02
-            bounce_height = 2
-            eye_state = "closed"
-        elif self.emotion == "excited":
-            color = QColor(255, 220, 100)
-            bounce_speed = 0.3
-            bounce_height = 20
-            eye_state = "open"
-        elif self.emotion == "sweating":
-            color = QColor(255, 80, 80) # Hot red
-            bounce_speed = 0.5 # Fast breathing
-            bounce_height = 6
-            eye_state = "angry"
-        elif self.emotion == "surprised":
-            color = QColor(180, 255, 200) # Mint
-            bounce_speed = 0.0
-            bounce_height = 0
-            eye_state = "wide"
+        if   self.emotion == "sad":       color, bounce_speed, bounce_height, eye_state = QColor(120,160,255), 0.03, 3,  "half"
+        elif self.emotion == "angry":     color, bounce_speed, bounce_height, eye_state = QColor(255,100,100), 0.4,  5,  "angry"
+        elif self.emotion == "thinking":  color, bounce_speed, bounce_height, eye_state = QColor(200,150,255), 0.05, 12, "open"
+        elif self.emotion == "bored":     color, bounce_speed, bounce_height, eye_state = QColor(160,160,160), 0.02, 2,  "closed"
+        elif self.emotion == "excited":   color, bounce_speed, bounce_height, eye_state = QColor(255,220,100), 0.3,  20, "open"
+        elif self.emotion == "sweating":  color, bounce_speed, bounce_height, eye_state = QColor(255,80, 80),  0.5,  6,  "angry"
+        elif self.emotion == "surprised": color, bounce_speed, bounce_height, eye_state = QColor(180,255,200), 0.0,  0,  "wide"
 
-        # Time-based slowdown
         hour = datetime.now().hour
-        if 0 <= hour < 5 or hour >= 23:
-            bounce_speed *= 0.4 # Very tired and slow
-        elif 20 <= hour < 23:
-            bounce_speed *= 0.7 # Getting sleepy
+        if 0 <= hour < 5 or hour >= 23: bounce_speed *= 0.4
+        elif 20 <= hour < 23:           bounce_speed *= 0.7
 
-        # Math for breathing/bouncing animation + Jumping
         offset_y = (math.sin(self.frame * bounce_speed) * bounce_height) + self.jump_offset
-        center_x = 100
-        center_y = 100 + offset_y
+        center_x, center_y = 100, 100 + offset_y
 
-        # Draw Shadow
         shadow_width = max(30, 80 - (offset_y * 1.5))
         painter.setBrush(QBrush(QColor(0, 0, 0, 40)))
         painter.setPen(Qt.NoPen)
         painter.drawEllipse(int(center_x - shadow_width/2), 160, int(shadow_width), 15)
 
-        # Draw Body
         painter.setBrush(QBrush(color))
         painter.drawEllipse(int(center_x - 50), int(center_y - 40), 100, 80)
-        painter.drawEllipse(int(center_x - 55), int(center_y - 10), 110, 50) 
+        painter.drawEllipse(int(center_x - 55), int(center_y - 10), 110, 50)
 
-        # Draw Eyes
         painter.setBrush(QBrush(QColor(40, 40, 40)))
         eye_y = int(center_y - 10)
-        left_eye_x = int(center_x - 25)
-        right_eye_x = int(center_x + 10)
-
+        left_eye_x, right_eye_x = int(center_x - 25), int(center_x + 10)
         is_blinking = self.blink_timer < 8
 
         if is_blinking or eye_state == "closed":
@@ -268,63 +309,79 @@ class AnimatedPetGraphics(QWidget):
             painter.drawEllipse(left_eye_x + 2, eye_y + 2, 4, 4)
             painter.drawEllipse(right_eye_x + 2, eye_y + 2, 4, 4)
 
-# --- MAIN APP ---
+
+# ===========================================================================
+# MAIN APP
+# ===========================================================================
 class Tamagotchi(QWidget):
     def __init__(self):
         super().__init__()
-        
-        # Base Dir & Config
-        self.base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        self.base_dir    = os.path.dirname(os.path.abspath(__file__))
         self.config_path = os.path.join(self.base_dir, "config.json")
         self.memory_path = os.path.join(self.base_dir, "memory.json")
-        
-        self.config = self.load_or_create_config()
-        self.pet_name = self.config.get("pet_name", "Tamagotchi")
+
+        self.config   = self.load_or_create_config()
+        self.pet_name = self.config.get("pet_name", "JARVIS")
         self.long_term_memory = self.load_memory()
 
         self.ollama_url = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
-        self.model = "llama3.2:3b"
-        self.system_prompt = f"You are a cute, expressive virtual desktop pet named {self.pet_name}. Keep answers short (1-2 sentences)."
-        
-        # Memory System
-        self.chat_history = collections.deque(maxlen=8) 
-        self.last_window_title = ""
-        self.mouse_travel = 0
-        self.is_bored_idle = False
+        self.model      = "llama3.2:3b"
 
-        # Sound System
+        # Build a readable app list for the system prompt
+        known_apps = ", ".join(sorted(APP_MAP.keys()))
+        self.system_prompt = (
+            f"You are {self.pet_name}, an AI assistant in the style of JARVIS from Iron Man. "
+            f"Address the user as 'sir'. Be concise, intelligent, and occasionally dry-humored. "
+            f"Keep answers to 1-2 sentences. "
+            f"You can launch applications. When the user asks you to open or launch something, "
+            f"end your reply with [launch:<key>] using one of these exact keys: {known_apps}. "
+            f"You can also close apps — end your reply with [close:<key>] using the same keys. "
+            f"For unknown apps just try [launch:<whatever they said>]. "
+            f"You can also set your emotion with [happy], [sad], [excited], [angry], [thinking], [surprised]."
+        )
+
+        self.chat_history     = collections.deque(maxlen=8)
+        self.last_window_title = ""
+        self.mouse_travel     = 0
+        self.is_bored_idle    = False
+
         os.makedirs(os.path.join(self.base_dir, "sounds"), exist_ok=True)
-        self.speech_output_path = "" # Generated dynamically to avoid file locks
+        self.speech_output_path = ""
         self.media_player = QMediaPlayer()
 
-        self.pop_sound_path = os.path.join(self.base_dir, "sounds", "pop.wav")
+        self.pop_sound_path    = os.path.join(self.base_dir, "sounds", "pop.wav")
         self.squeak_sound_path = os.path.join(self.base_dir, "sounds", "squeak.wav")
-        self.pop_sound = QSoundEffect()
+        self.pop_sound    = QSoundEffect()
         self.pop_sound.setSource(QUrl.fromLocalFile(self.pop_sound_path))
         self.squeak_sound = QSoundEffect()
         self.squeak_sound.setSource(QUrl.fromLocalFile(self.squeak_sound_path))
 
-        # Window setup (Accepts Drops for Feeding!)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.SubWindow)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setFixedSize(350, 350)
-        self.setAcceptDrops(True) 
-        self.setMouseTracking(True) # For petting
+        self.setAcceptDrops(True)
+        self.setMouseTracking(True)
 
         layout = QVBoxLayout()
-        
+
         self.speech = QLabel("")
         self.speech.setWordWrap(True)
         self.speech.setAlignment(Qt.AlignCenter)
-        self.speech.setStyleSheet("color: white; background-color: rgba(30, 30, 30, 230); border: 2px solid #a8ffb2; border-radius: 10px; padding: 12px; font-size: 14px; font-weight: bold;")
-        self.speech.hide() 
-        
+        self.speech.setStyleSheet(
+            "color: #00d4ff; background-color: rgba(5, 15, 30, 230); "
+            "border: 2px solid #00d4ff; border-radius: 10px; "
+            "padding: 12px; font-size: 13px; font-weight: bold; font-family: Consolas;")
+        self.speech.hide()
+
         self.pet_canvas = AnimatedPetGraphics()
         self.pet_canvas.setAttribute(Qt.WA_TransparentForMouseEvents)
 
         self.input_box = QLineEdit()
-        self.input_box.setPlaceholderText("Type 'read this' to read clipboard...")
-        self.input_box.setStyleSheet("background-color: rgba(255, 255, 255, 0.95); border: 2px solid #a8ffb2; border-radius: 8px; padding: 6px; color: black;")
+        self.input_box.setPlaceholderText("Awaiting your command, sir...")
+        self.input_box.setStyleSheet(
+            "background-color: rgba(0, 10, 25, 220); border: 2px solid #00d4ff; "
+            "border-radius: 8px; padding: 6px; color: #00d4ff; font-family: Consolas;")
         self.input_box.hide()
         self.input_box.returnPressed.connect(self.process_user_input)
         self.input_box.textChanged.connect(self.on_typing)
@@ -335,21 +392,21 @@ class Tamagotchi(QWidget):
         self.setLayout(layout)
         self.move(1200, 600)
 
-        # AI Worker Thread
         self.active_ollama_workers = set()
-        self.active_tts_workers = set()
+        self.active_tts_workers    = set()
         self.active_memory_workers = set()
 
-        # Idle & System Monitoring Timer
         self.system_timer = QTimer()
         self.system_timer.timeout.connect(self.monitor_system)
-        self.system_timer.start(5000) # Check every 5 seconds
+        self.system_timer.start(5000)
 
-        # Start initial context fetch (Weather & Time)
         self.startup_worker = StartupContextWorker()
         self.startup_worker.finished.connect(self.on_startup_context_ready)
         self.startup_worker.start()
 
+    # -----------------------------------------------------------------------
+    # CONFIG & MEMORY
+    # -----------------------------------------------------------------------
     def load_or_create_config(self):
         if os.path.exists(self.config_path):
             try:
@@ -357,10 +414,8 @@ class Tamagotchi(QWidget):
                     return json.load(f)
             except Exception:
                 pass
-        
-        # If not exists or corrupted, ask for pet name
-        name, ok = QInputDialog.getText(None, "New Pet!", "What should we call your new pet?")
-        name = name.strip() if ok and name.strip() else "Tamagotchi"
+        name, ok = QInputDialog.getText(None, "New Assistant", "Name your AI assistant:")
+        name = name.strip() if ok and name.strip() else "JARVIS"
         config = {"pet_name": name}
         with open(self.config_path, 'w', encoding='utf-8') as f:
             json.dump(config, f)
@@ -379,15 +434,81 @@ class Tamagotchi(QWidget):
         with open(self.memory_path, 'w', encoding='utf-8') as f:
             json.dump(self.long_term_memory, f)
 
-    def on_startup_context_ready(self, context):
-        time_str = context.get('time', 'Unknown time')
-        weather_str = context.get('weather', 'Unknown weather')
-        
-        # Add system context to the first prompt
-        greeting_prompt = f"*System Note: You just woke up. It's {time_str} and the weather outside is {weather_str}. Give the user a short personalized greeting!*"
-        
-        QTimer.singleShot(1000, lambda: self.send_to_ollama(greeting_prompt))
+    # -----------------------------------------------------------------------
+    # APP LAUNCHER  ← the core new feature
+    # -----------------------------------------------------------------------
+    def _resolve_app_path(self, key):
+        """Return the expanded executable path for a key, or None if not found."""
+        path = APP_MAP.get(key.lower().strip())
+        if path:
+            return os.path.expandvars(path)
+        return None
 
+    def launch_app(self, key, url=None):
+        """
+        Launch an app by its APP_MAP key.
+        If url is provided it is appended as an argument (e.g. for browsers).
+        Falls back to trying `key.exe` directly if not in the map.
+        Returns (success: bool, message: str)
+        """
+        path = self._resolve_app_path(key)
+
+        if not path:
+            # Graceful fallback — try it as a raw exe name
+            path = key if key.endswith(".exe") else f"{key}.exe"
+
+        try:
+            cmd = [path]
+            if url:
+                cmd.append(url)
+
+            # ms-settings: style URIs need ShellExecute, not Popen
+            if path.startswith("ms-"):
+                os.startfile(path)
+            else:
+                subprocess.Popen(cmd, shell=False)
+
+            app_label = key.title()
+            return True, f"Launching {app_label}, sir."
+        except FileNotFoundError:
+            return False, f"I couldn't locate {key}, sir. The path may need updating in APP_MAP."
+        except Exception as e:
+            return False, f"Launch failed for {key}: {e}"
+
+    def close_app(self, key):
+        """
+        Kill all processes matching PROCESS_MAP[key].
+        Falls back to treating key itself as the exe name.
+        Returns (success: bool, message: str)
+        """
+        proc_name = PROCESS_MAP.get(key.lower().strip(), key if key.endswith(".exe") else f"{key}.exe")
+        killed = 0
+        for proc in psutil.process_iter(['name']):
+            try:
+                if proc.info['name'] and proc.info['name'].lower() == proc_name.lower():
+                    proc.kill()
+                    killed += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+
+        if killed:
+            return True, f"Terminated {key.title()} ({killed} process{'es' if killed > 1 else ''}), sir."
+        else:
+            return False, f"No running instances of {key.title()} found, sir."
+
+    # -----------------------------------------------------------------------
+    # STARTUP
+    # -----------------------------------------------------------------------
+    def on_startup_context_ready(self, context):
+        time_str    = context.get('time', 'Unknown time')
+        weather_str = context.get('weather', 'Unknown weather')
+        greeting    = (f"*System Note: You just came online. It is {time_str} and the weather is "
+                       f"{weather_str}. Give the user a short, formal JARVIS-style greeting.*")
+        QTimer.singleShot(1000, lambda: self.send_to_ollama(greeting))
+
+    # -----------------------------------------------------------------------
+    # UI HELPERS
+    # -----------------------------------------------------------------------
     def set_emotion(self, emotion):
         self.pet_canvas.emotion = emotion
 
@@ -397,72 +518,71 @@ class Tamagotchi(QWidget):
         if os.path.exists(self.pop_sound_path):
             self.pop_sound.play()
 
-    # --- SENSORS & BRAIN ---
+    # -----------------------------------------------------------------------
+    # SYSTEM MONITOR
+    # -----------------------------------------------------------------------
     def monitor_system(self):
-        # 1. Check PC Resources
         cpu = psutil.cpu_percent()
         ram = psutil.virtual_memory().percent
         if cpu > 85 or ram > 90:
             self.set_emotion("sweating")
-            self.show_speech(f"It's getting hot in here! CPU: {cpu}%, RAM: {ram}% 🥵")
+            self.show_speech(f"⚠ System under strain, sir. CPU: {cpu}% | RAM: {ram}%")
             return
 
-        # 2. Check Active Window (Windows OS specific)
         if sys.platform != "win32":
             return
-        
+
         try:
-            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            hwnd   = ctypes.windll.user32.GetForegroundWindow()
             length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
-            buf = ctypes.create_unicode_buffer(length + 1)
+            buf    = ctypes.create_unicode_buffer(length + 1)
             ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
             active_title = buf.value.lower()
 
             if active_title != self.last_window_title and active_title:
                 self.last_window_title = active_title
-                if "spotify" in active_title or "youtube music" in active_title or "apple music" in active_title:
+                if any(k in active_title for k in ["spotify", "youtube music", "apple music"]):
                     self.set_emotion("happy")
-                    self.show_speech("Ooo, I love this song! 🎵 *dances*")
-                elif "code" in active_title or "visual studio" in active_title:
+                    self.show_speech("Music detected. Shall I add this to your playlist, sir? 🎵")
+                elif any(k in active_title for k in ["code", "visual studio", "pycharm", "sublime"]):
                     hour = datetime.now().hour
                     if 0 <= hour < 5:
                         self.set_emotion("angry")
-                        self.show_speech("Go to sleep! It's too late for coding! 💢")
+                        self.show_speech("Sir, it is past midnight. Rest is advisable. 💢")
                     else:
                         self.set_emotion("excited")
-                        self.show_speech("Ooo, are we coding something cool? 💻")
+                        self.show_speech("Engineering mode engaged. 💻")
                 elif "youtube" in active_title:
                     self.set_emotion("happy")
-                    self.show_speech("Whatcha watching? 👀")
-        except:
-            pass # Fails gracefully on non-Windows
+                    self.show_speech("Monitoring your viewing activity, sir. 👀")
+        except Exception:
+            pass
 
-        # 3. Check System Idle Time (Windows API)
         try:
             lii = LASTINPUTINFO()
             lii.cbSize = ctypes.sizeof(LASTINPUTINFO)
             ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lii))
-            millis = ctypes.windll.kernel32.GetTickCount() - lii.dwTime
+            millis       = ctypes.windll.kernel32.GetTickCount() - lii.dwTime
             idle_seconds = millis / 1000.0
-            
-            if idle_seconds > 600: # 10 minutes
-                if not getattr(self, 'is_bored_idle', False):
+            if idle_seconds > 600:
+                if not self.is_bored_idle:
                     self.is_bored_idle = True
-                    self.send_to_ollama("*System Note: The user has been completely idle and away from their computer for 10 minutes. Get their attention or complain about being bored!*")
+                    self.send_to_ollama("*System Note: The user has been idle for 10 minutes. "
+                                        "Request a status update in a formal JARVIS manner.*")
             else:
                 self.is_bored_idle = False
-        except:
-            pass # Fails gracefully on non-Windows
+        except Exception:
+            pass
 
-    # --- INTERACTIVITY ---
+    # -----------------------------------------------------------------------
+    # MOUSE EVENTS
+    # -----------------------------------------------------------------------
     def mouseMoveEvent(self, event):
         if event.buttons() == Qt.LeftButton:
-            # Dragging the window
             self.move(event.globalPos() - self.dragPosition)
         elif not event.buttons():
-            # Hovering / Petting
             self.mouse_travel += 1
-            if self.mouse_travel > 40: # If mouse wiggled a lot over pet
+            if self.mouse_travel > 40:
                 self.set_emotion("happy")
                 self.mouse_travel = 0
         event.accept()
@@ -470,7 +590,7 @@ class Tamagotchi(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.dragPosition = event.globalPos() - self.frameGeometry().topLeft()
-            self.pet_canvas.poke() # Jump!
+            self.pet_canvas.poke()
             if os.path.exists(self.squeak_sound_path):
                 self.squeak_sound.play()
             event.accept()
@@ -483,16 +603,18 @@ class Tamagotchi(QWidget):
             else:
                 self.input_box.show()
                 self.input_box.setFocus()
-                self.show_speech("I'm listening! 💬")
+                self.show_speech("Awaiting your command, sir. 💬")
 
     def contextMenuEvent(self, event):
-        context_menu = QMenu(self)
-        quit_action = QAction("Quit", self)
+        menu = QMenu(self)
+        quit_action = QAction("Shut Down", self)
         quit_action.triggered.connect(QApplication.instance().quit)
-        context_menu.addAction(quit_action)
-        context_menu.exec_(event.globalPos())
+        menu.addAction(quit_action)
+        menu.exec_(event.globalPos())
 
-    # --- FEEDING (DRAG & DROP) ---
+    # -----------------------------------------------------------------------
+    # DRAG & DROP
+    # -----------------------------------------------------------------------
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls() or event.mimeData().hasText():
             self.set_emotion("surprised")
@@ -503,58 +625,101 @@ class Tamagotchi(QWidget):
     def dropEvent(self, event):
         if event.mimeData().hasUrls():
             file_path = event.mimeData().urls()[0].toLocalFile()
-            if file_path.endswith('.txt') or file_path.endswith('.py') or file_path.endswith('.md'):
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()[:1000].rsplit('\n', 1)[0] # Read first 1000 chars so we don't crash Ollama
-                self.send_to_ollama(f"I just ate a file named {os.path.basename(file_path)}. Here is a taste of it: {content}. What do you think of the flavor?")
+            if file_path.endswith(('.txt', '.py', '.md', '.json', '.log')):
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()[:1000].rsplit('\n', 1)[0]
+                self.send_to_ollama(
+                    f"I just received a file named '{os.path.basename(file_path)}'. "
+                    f"Here is its content: {content}. Please analyse it briefly.")
             else:
-                self.show_speech("I can only eat text files! Yuck! [sad]")
+                self.show_speech("I can only process text-based files, sir.")
                 self.set_emotion("sad")
 
-    # --- LLM COMMUNICATION ---
+    # -----------------------------------------------------------------------
+    # INPUT HANDLING
+    # -----------------------------------------------------------------------
     def on_typing(self, text):
         if self.active_ollama_workers:
-            return  # Don't interrupt "thinking" or waiting state
-            
+            return
         length = len(text)
-        if length == 0:
-            self.set_emotion("happy")
-        elif length <= 10:
-            self.set_emotion("thinking") # Curious at first
-        elif length <= 25:
-            self.set_emotion("surprised") # Getting invested
-        else:
-            self.set_emotion("bored") # Impatient, taking too long
+        if length == 0:         self.set_emotion("happy")
+        elif length <= 10:      self.set_emotion("thinking")
+        elif length <= 25:      self.set_emotion("surprised")
+        else:                   self.set_emotion("bored")
 
     def process_user_input(self):
         text = self.input_box.text().strip()
-        if not text: return
-
+        if not text:
+            return
         self.input_box.clear()
         self.input_box.hide()
 
-        # Clipboard Awareness
-        if text.lower() == "read this":
+        lower = text.lower()
+
+        # ── Direct "open <app>" command ──────────────────────────────────
+        if lower.startswith("open ") or lower.startswith("launch "):
+            prefix_len = 5 if lower.startswith("open ") else 7
+            raw_key    = lower[prefix_len:].strip()
+
+            # Check if a URL was appended: "open brave youtube.com"
+            url = None
+            for browser in ["chrome", "firefox", "edge", "brave", "opera"]:
+                if raw_key.startswith(browser):
+                    remainder = raw_key[len(browser):].strip()
+                    if remainder:
+                        url = remainder if remainder.startswith("http") else f"https://{remainder}"
+                    raw_key = browser
+                    break
+
+            success, msg = self.launch_app(raw_key, url)
+            self.set_emotion("excited" if success else "sad")
+            self.show_speech(msg)
+            self.chat_history.append({"role": "User",  "content": text})
+            self.chat_history.append({"role": "Pet",   "content": msg})
+            return
+
+        # ── Direct "close <app>" command ─────────────────────────────────
+        if lower.startswith("close ") or lower.startswith("kill "):
+            prefix_len = 6 if lower.startswith("close ") else 5
+            raw_key    = lower[prefix_len:].strip()
+            success, msg = self.close_app(raw_key)
+            self.set_emotion("angry" if success else "sad")
+            self.show_speech(msg)
+            self.chat_history.append({"role": "User",  "content": text})
+            self.chat_history.append({"role": "Pet",   "content": msg})
+            return
+
+        # ── Clipboard read ────────────────────────────────────────────────
+        if lower == "read this":
             clipboard_text = QApplication.clipboard().text()
-            if clipboard_text:
-                text = f"The user copied this text to their clipboard. Read it and comment on it: '{clipboard_text}'"
-            else:
-                text = "I tried to read the clipboard but it was empty!"
+            text = (f"The user copied this text: '{clipboard_text}'. Analyse it briefly."
+                    if clipboard_text else "The clipboard was empty, sir.")
+
+        # ── List available apps ───────────────────────────────────────────
+        if lower in ["list apps", "what can you open", "available apps"]:
+            app_list = ", ".join(sorted(APP_MAP.keys()))
+            self.show_speech(f"I can launch: {app_list}")
+            return
 
         self.send_to_ollama(text)
 
+    # -----------------------------------------------------------------------
+    # MEMORY
+    # -----------------------------------------------------------------------
     def handle_memory_extracted(self, fact):
-        if fact and "NONE" not in fact.upper() and len(fact) > 5 and len(fact) < 150:
+        if fact and "NONE" not in fact.upper() and 5 < len(fact) < 150:
             date_str = datetime.now().strftime("%Y-%m-%d")
             self.long_term_memory.append(f"[{date_str}] {fact}")
-            self.long_term_memory = self.long_term_memory[-15:] # Keep latest 15 facts cleaner than pop(0)
+            self.long_term_memory = self.long_term_memory[-15:]
             self.save_memory()
 
+    # -----------------------------------------------------------------------
+    # OLLAMA
+    # -----------------------------------------------------------------------
     def send_to_ollama(self, user_text):
         self.set_emotion("thinking")
-        self.show_speech("Thinking... (-_-)")
+        self.show_speech("Processing query... ▋")
 
-        # Trigger Long-Term Memory Extraction but guard against System Notes
         if not user_text.startswith("*System Note"):
             mem_worker = MemoryWorker(self.ollama_url, self.model, user_text)
             self.active_memory_workers.add(mem_worker)
@@ -562,69 +727,76 @@ class Tamagotchi(QWidget):
             mem_worker.finished.connect(lambda res, w=mem_worker: self.active_memory_workers.discard(w))
             mem_worker.start()
 
-        # Build Memory Context (Keep last 8 messages)
         self.chat_history.append({"role": "User", "content": user_text})
 
-        # Add Long Term Memory Context if it exists
         lt_memory_context = ""
         if self.long_term_memory:
             facts = '\n- '.join(self.long_term_memory)
-            lt_memory_context = f"\n[Long-term memories about the user:\n- {facts}]\n"
+            lt_memory_context = f"\n[Long-term data on user:\n- {facts}]\n"
 
         full_prompt = f"{self.system_prompt}{lt_memory_context}\n\n"
         for msg in self.chat_history:
             full_prompt += f"{msg['role']}: {msg['content']}\n"
         full_prompt += "Pet:"
 
-        # Start background thread so animation doesn't freeze
-        ollama_worker = OllamaWorker(self.ollama_url, self.model, full_prompt)
-        self.active_ollama_workers.add(ollama_worker)
-        ollama_worker.finished.connect(self.handle_ollama_response)
-        ollama_worker.finished.connect(lambda res, w=ollama_worker: self.active_ollama_workers.discard(w))
-        ollama_worker.start()
+        worker = OllamaWorker(self.ollama_url, self.model, full_prompt)
+        self.active_ollama_workers.add(worker)
+        worker.finished.connect(self.handle_ollama_response)
+        worker.finished.connect(lambda res, w=worker: self.active_ollama_workers.discard(w))
+        worker.start()
 
     def handle_ollama_response(self, raw_response):
-        if raw_response.startswith("Error") or raw_response.startswith("My brain disconnected"):
+        if raw_response.startswith("Error") or raw_response.startswith("Systems offline"):
             if self.chat_history and self.chat_history[-1]["role"] == "User":
                 self.chat_history.pop()
 
-        # Extract Emotion
-        match = re.search(r'\[([a-zA-Z]+)\]\s*$', raw_response)
-        if match:
-            self.set_emotion(match.group(1).lower())
+        # ── Handle [launch:<key>] tag from AI ────────────────────────────
+        launch_match = re.search(r'\[launch:([^\]]+)\]', raw_response, re.IGNORECASE)
+        if launch_match:
+            app_key = launch_match.group(1).strip().lower()
+            success, launch_msg = self.launch_app(app_key)
+            if not success:
+                print(f"[JARVIS Launcher] {launch_msg}")
+
+        # ── Handle [close:<key>] tag from AI ─────────────────────────────
+        close_match = re.search(r'\[close:([^\]]+)\]', raw_response, re.IGNORECASE)
+        if close_match:
+            app_key = close_match.group(1).strip().lower()
+            self.close_app(app_key)
+
+        # ── Extract emotion tag ───────────────────────────────────────────
+        emotion_match = re.search(r'\[([a-zA-Z]+)\]\s*$', raw_response)
+        if emotion_match:
+            self.set_emotion(emotion_match.group(1).lower())
         else:
             self.set_emotion("happy")
 
+        # Strip all tags for display
         clean_text = re.sub(r'\[.*?\]', '', raw_response).strip()
         self.show_speech(clean_text)
-        
-        # Start TTS (Voice)
         self.speak_text(clean_text)
-        
-        # Save to memory
         self.chat_history.append({"role": "Pet", "content": clean_text})
 
+    # -----------------------------------------------------------------------
+    # TTS
+    # -----------------------------------------------------------------------
     def speak_text(self, text):
-        if not text: return
-        
-        # 1. Stop current audio and explicitly release the file lock for Windows
+        if not text:
+            return
         self.media_player.stop()
         self.media_player.setMedia(QMediaContent())
-        
-        # 2. Clean up any previous speech.mp3 files to prevent folder bloat
+
         sounds_dir = os.path.join(self.base_dir, "sounds")
         for fname in os.listdir(sounds_dir):
-            if (fname.startswith("speech_") and fname.endswith(".mp3")) or fname == "speech.mp3":
-                file_to_del = os.path.join(sounds_dir, fname)
+            if fname.startswith("speech_") and fname.endswith(".mp3"):
                 try:
-                    os.remove(file_to_del)
+                    os.remove(os.path.join(sounds_dir, fname))
                 except Exception:
-                    pass # Keep going if file is locked
-                    
-        # 3. Create a unique mp3 name for THIS message so edge-tts never hits "Permission Denied"
-        unique_timestamp = int(datetime.now().timestamp() * 1000)
-        self.speech_output_path = os.path.join(sounds_dir, f"speech_{unique_timestamp}.mp3")
-        
+                    pass
+
+        unique_ts = int(datetime.now().timestamp() * 1000)
+        self.speech_output_path = os.path.join(sounds_dir, f"speech_{unique_ts}.mp3")
+
         tts_worker = TTSWorker(text, self.speech_output_path)
         self.active_tts_workers.add(tts_worker)
         tts_worker.finished.connect(self.play_speech)
@@ -635,6 +807,7 @@ class Tamagotchi(QWidget):
         if path and os.path.exists(path):
             self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(path)))
             self.media_player.play()
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
