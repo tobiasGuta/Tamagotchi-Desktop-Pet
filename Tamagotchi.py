@@ -80,6 +80,7 @@ APP_MAP = {
     "7zip":       r"C:\Program Files\7-Zip\7zFM.exe",
     "winrar":     r"C:\Program Files\WinRAR\WinRAR.exe",
     "steam":      r"C:\Program Files (x86)\Steam\steam.exe",
+    "Burp Suite":  r"C:\Users\TobiasAre\AppData\Local\Programs\BurpSuiteCommunity\BurpSuiteCommunity.exe",
 }
 
 # Process names used by psutil when CLOSING apps (lowercase .exe name)
@@ -132,7 +133,7 @@ class StartupContextWorker(QThread):
             lat, lon, city = geo.get('latitude', ''), geo.get('longitude', ''), geo.get('city', '')
             if lat and lon:
                 weather_res = requests.get(
-                    f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true",
+                    f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true&temperature_unit=fahrenheit",
                     timeout=5).json()
                 wcode = weather_res.get('current_weather', {}).get('weathercode', 0)
                 temp  = weather_res.get('current_weather', {}).get('temperature', 0)
@@ -143,7 +144,7 @@ class StartupContextWorker(QThread):
                 elif wcode in [61, 63, 65, 66, 67]:  weather_desc = "Raining"
                 elif wcode in [71, 73, 75, 77]:      weather_desc = "Snowing"
                 elif wcode in [95, 96, 99]:           weather_desc = "Thunderstorm"
-                context['weather'] = f"{weather_desc}, {temp}°C in {city}"
+                context['weather'] = f"{weather_desc}, {temp}°F in {city}"
         except Exception:
             context['weather'] = "Unknown weather"
 
